@@ -43,10 +43,20 @@ class Critic(nn.Module):
         return self.net(torch.cat([state, action], dim=1))
 
 class DDPGAgent:
-    def __init__(self, env, gamma=0.99, tau=0.005, lr_actor=1e-4, lr_critic=1e-3):
+    def __init__(self, env, gamma=0.99, tau=0.005, lr_actor=1e-4, lr_critic=1e-3, 
+                 initial_noise_std=0.2, noise_decay=0.995, min_noise=0.01):
         self.env = env
         self.gamma = gamma
         self.tau = tau
+        self.lr_actor = lr_actor
+        self.lr_critic = lr_critic
+        
+        # 探索噪声参数
+        self.initial_noise_std = initial_noise_std
+        self.current_noise_std = initial_noise_std
+        self.noise_decay = noise_decay
+        self.min_noise = min_noise
+        self.episode_count = 0
         
         state_dim = env.observation_space.shape[0]
         action_dim = env.action_space.shape[0]
@@ -84,14 +94,65 @@ class DDPGAgent:
     def predict(self, state, deterministic=True):
         state = torch.FloatTensor(state).unsqueeze(0)
         action = self.actor(state).detach().numpy()[0]
+        
         if not deterministic:
-            action += np.random.normal(0, 0.1, size=action.shape)
+            # 计算不确定性
+            with torch.no_grad():
+                # 获取多个动作预测
+                actions = []
+                for _ in range(5):  # 使用5个随机dropout预测
+                    self.actor.train()  # 启用dropout
+                    actions.append(self.actor(state).detach().numpy()[0])
+                self.actor.eval()  # 恢复eval模式
+                
+                # 计算动作方差
+                action_var = np.var(actions, axis=0)
+                uncertainty = np.mean(action_var)
+                
+                # 基于不确定性的自适应噪声
+                adaptive_noise_std = self.current_noise_std * (1 + uncertainty)
+                noise = np.random.normal(0, adaptive_noise_std, size=action.shape)
+                action += noise
+                
+                # 记录探索信息
+                logger.debug(f"Current noise std: {self.current_noise_std:.4f}")
+                logger.debug(f"Action uncertainty: {uncertainty:.4f}")
+                logger.debug(f"Adaptive noise std: {adaptive_noise_std:.4f}")
+                logger.debug(f"Action noise: {np.mean(np.abs(noise)):.4f}")
+                
+                # 更新噪声标准差
+                self.current_noise_std = max(
+                    self.min_noise,
+                    self.current_noise_std * self.noise_decay
+                )
+            
         return np.clip(action, -1, 1)
     
     def train(self, num_episodes=1000):
+        # 初始化训练统计
+        stats = {
+            'episode_rewards': [],
+            'avg_q_values': [],
+            'critic_losses': [],
+            'actor_losses': [],
+            'exploration_rates': []
+        }
+        
         for episode in range(num_episodes):
             state = self.env.reset()
             episode_reward = 0
+            self.episode_count += 1
+            
+            # 更新噪声标准差
+            self.current_noise_std = max(
+                self.min_noise,
+                self.initial_noise_std * (self.noise_decay ** self.episode_count)
+            )
+            
+            # 初始化episode统计
+            episode_q_values = []
+            episode_critic_losses = []
+            episode_actor_losses = []
             
             while True:
                 action = self.predict(state, deterministic=False)
@@ -102,7 +163,11 @@ class DDPGAgent:
                     self.replay_buffer.pop(0)
                 
                 if len(self.replay_buffer) >= self.batch_size:
-                    self.update()
+                    # 更新网络并收集统计信息
+                    critic_loss, actor_loss, avg_q = self.update()
+                    episode_critic_losses.append(critic_loss)
+                    episode_actor_losses.append(actor_loss)
+                    episode_q_values.append(avg_q)
                 
                 state = next_state
                 episode_reward += reward
@@ -110,7 +175,27 @@ class DDPGAgent:
                 if done:
                     break
             
-            logger.info(f"Episode {episode + 1}, Reward: {episode_reward}")
+            # 记录episode统计
+            stats['episode_rewards'].append(episode_reward)
+            stats['avg_q_values'].append(np.mean(episode_q_values) if episode_q_values else 0)
+            stats['critic_losses'].append(np.mean(episode_critic_losses) if episode_critic_losses else 0)
+            stats['actor_losses'].append(np.mean(episode_actor_losses) if episode_actor_losses else 0)
+            stats['exploration_rates'].append(self.current_noise_std)
+            
+            # 记录训练信息
+            logger.info(f"Episode {episode + 1}/{num_episodes}")
+            logger.info(f"  Reward: {float(episode_reward):.2f}")
+            logger.info(f"  Avg Q-value: {stats['avg_q_values'][-1]:.4f}")
+            logger.info(f"  Critic Loss: {stats['critic_losses'][-1]:.4f}")
+            logger.info(f"  Actor Loss: {stats['actor_losses'][-1]:.4f}")
+            logger.info(f"  Exploration Rate: {self.current_noise_std:.4f}")
+            logger.info(f"  Buffer Size: {len(self.replay_buffer)}")
+            
+            # 每100个episode保存训练统计
+            if (episode + 1) % 100 == 0:
+                self.save_training_stats(stats)
+        
+        return stats
     
     def update(self):
         # 计算优先级
@@ -173,6 +258,12 @@ class DDPGAgent:
         self.update_step += 1
         self.beta = min(1.0, self.beta + self.beta_increment)
         self.noise_std = max(self.min_noise, self.noise_std * self.noise_decay)
+        
+        # 计算平均Q值
+        avg_q = current_q_values.mean().item()
+        
+        # 返回统计信息
+        return critic_loss.item(), actor_loss.item(), avg_q
 
 def create_and_train_agent(env_train, batch_size, buffer_size, learning_rate, net_arch, total_timesteps):
     try:
@@ -197,10 +288,11 @@ def predict_with_agent(agent, environment, deterministic=True):
         account_values = []
         actions = []
         prices = []
+        dates = []
 
         # 获取测试环境的原始日期索引
         if hasattr(env, 'df'):
-            test_dates = env.df['date'].unique()
+            test_dates = environment.df.index
         else:
             test_dates = np.arange(10)  # 默认10天预测
 
@@ -218,39 +310,55 @@ def predict_with_agent(agent, environment, deterministic=True):
             # 记录账户价值
             account_values.append(env.get_account_value())
             
-            # 从info字典中获取当前价格
-            if info and 'current_price' in info:
-                prices.append(info['current_price'])
+            # 从info字典中获取当前价格和日期
+            if info:
+                if 'current_price' in info:
+                    prices.append(info['current_price'])
+                else:
+                    prices.append(np.nan)
+                    logger.warning("无法从info字典中获取价格信息")
+                
+                if 'date' in info:
+                    dates.append(info['date'])
+                else:
+                    dates.append(test_dates[i] if i < len(test_dates) else np.nan)
+                    logger.warning("无法从info字典中获取日期信息")
             else:
                 prices.append(np.nan)
-                logger.warning("无法从info字典中获取价格信息")
+                dates.append(test_dates[i] if i < len(test_dates) else np.nan)
+                logger.warning("info字典为空")
 
             if terminated:
                 break
 
         # 确保数组长度一致
-        min_length = min(len(test_dates), len(account_values), len(prices), len(actions))
+        min_length = min(len(test_dates), len(account_values), len(prices), len(actions), len(dates))
         
         # 创建包含日期和价格的 DataFrame
         df_results = pd.DataFrame({
-            'date': test_dates[:min_length],
-            'current_price': prices[:min_length] if len(prices) > 0 else account_values[:min_length],
+            'date': dates[:min_length],
+            'current_price': prices[:min_length],
             'account_value': account_values[:min_length]
         })
         
         # 创建包含动作的DataFrame
         df_actions = pd.DataFrame({
-            'date': test_dates[:min_length],
+            'date': dates[:min_length],
             'action': actions[:min_length]
         })
         
-        # 设置日期索引
+        # 设置日期索引并确保日期格式正确
+        df_results['date'] = pd.to_datetime(df_results['date'])
+        df_actions['date'] = pd.to_datetime(df_actions['date'])
         df_results.set_index('date', inplace=True)
         df_actions.set_index('date', inplace=True)
         
-        # 验证数据
-        if 'current_price' not in df_results.columns:
-            raise ValueError("无法获取价格信息，请检查环境实现")
+        # 验证数据完整性
+        if df_results['current_price'].isnull().all():
+            raise ValueError("无法获取有效的价格信息，请检查环境实现")
+            
+        if df_results.index.isnull().any():
+            raise ValueError("日期信息不完整，请检查环境实现")
         
         return df_results, df_actions
     except Exception as e:

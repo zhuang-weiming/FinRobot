@@ -1,3 +1,5 @@
+import matplotlib
+matplotlib.use('TkAgg')  # 设置后端
 import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
 import matplotlib.font_manager as fm
@@ -153,50 +155,87 @@ def calculate_metrics(df):
         logger.error(f"回测指标计算失败: {str(e)}")
         raise
 
-def plot_stock_predictions(df_predictions, history_days=30, predict_days=10):
+def plot_stock_predictions(df, predictions, history_days=30, predict_days=10, preprocessor=None):
     """
     可视化股票价格预测
-    :param df_predictions: 预测数据，包含date和price两列
+    :param df: 历史数据，包含date和price两列
+    :param predictions: 预测数据，包含date和price两列
     :param history_days: 显示的历史天数
     :param predict_days: 预测的天数
+    :param preprocessor: 预处理器对象，用于反标准化预测价格
     """
     try:
         # 数据验证
-        if not isinstance(df_predictions, pd.DataFrame):
+        if not isinstance(df, pd.DataFrame) or not isinstance(predictions, pd.DataFrame):
             raise ValueError("输入数据必须是Pandas DataFrame")
             
-        if not {'date', 'price'}.issubset(df_predictions.columns):
+        if not {'date', 'price'}.issubset(df.columns) or not {'date', 'price'}.issubset(predictions.columns):
             raise ValueError("输入数据必须包含date和price两列")
             
         # 确保日期格式正确
-        df_predictions['date'] = pd.to_datetime(df_predictions['date'])
+        df['date'] = pd.to_datetime(df['date'])
+        predictions['date'] = pd.to_datetime(predictions['date'])
+        
+        # 合并历史数据和预测数据
+        combined_df = pd.concat([df, predictions], ignore_index=True)
+        combined_df = combined_df.sort_values(by='date')
+        combined_df = combined_df.drop_duplicates(subset='date', keep='first')
+        combined_df = combined_df.set_index('date')
+        combined_df = combined_df.rename_axis('date')
         
         # 设置绘图
         plt.figure(figsize=(15, 6))
         
         # 计算日期范围
-        end_date = df_predictions['date'].max()
+        end_date = df['date'].max()
         start_date = end_date - timedelta(days=history_days)
         future_end_date = end_date + timedelta(days=predict_days)
         
         # 过滤数据
-        filtered_df = df_predictions[(df_predictions['date'] >= start_date) & 
-                                   (df_predictions['date'] <= future_end_date)]
+        filtered_df = combined_df[(combined_df.index >= start_date) & 
+                                (combined_df.index <= future_end_date)].copy()
+        
+        # 反标准化预测价格
+        if preprocessor is not None:
+            if hasattr(preprocessor, 'mean_price') and hasattr(preprocessor, 'std_price'):
+                # 仅对预测部分进行反标准化
+                future_mask = filtered_df.index > end_date
+                if future_mask.any():
+                    filtered_df.loc[future_mask, 'price'] = (
+                        filtered_df.loc[future_mask, 'price'] * preprocessor.std_price
+                    ) + preprocessor.mean_price
+                    print("反标准化后的预测数据:")
+                    print(filtered_df[future_mask])
+            else:
+                logger.warning("预处理器缺少必要的标准化参数")
+        
+        # 计算Y轴范围
+        min_price = filtered_df['price'].min()
+        max_price = filtered_df['price'].max()
+        price_range = max_price - min_price
+        y_min = min_price - price_range * 0.1  # 下扩10%范围
+        y_max = max_price + price_range * 0.1  # 上扩10%范围
         
         # 绘制历史价格曲线
-        plt.plot(filtered_df[filtered_df['date'] <= end_date]['date'], 
-                filtered_df[filtered_df['date'] <= end_date]['price'],
+        plt.plot(filtered_df[filtered_df.index <= end_date].index, 
+                filtered_df[filtered_df.index <= end_date]['price'],
                 color='blue', linestyle='-', label='历史价格')
-        
+                
         # 绘制预测价格曲线
-        plt.plot(filtered_df[filtered_df['date'] > end_date]['date'], 
-                filtered_df[filtered_df['date'] > end_date]['price'],
-                color='red', linestyle='--', label='预测价格')
+        if len(filtered_df[filtered_df.index > end_date]) > 0:
+            plt.plot(filtered_df[filtered_df.index > end_date].index, 
+                    filtered_df[filtered_df.index > end_date]['price'],
+                    color='red', linestyle='--', label='预测价格')
+        else:
+            print("警告: 没有找到预测起始日期之后的预测数据")
         
         # 设置坐标轴格式
         plt.gca().yaxis.set_major_formatter('¥{x:,.2f}')
         plt.gca().xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d'))
         plt.gca().xaxis.set_major_locator(mdates.DayLocator(interval=max(1, predict_days//5)))
+        
+        # 设置Y轴范围
+        plt.ylim(y_min, y_max)
         
         # 添加预测区间标记
         plt.axvline(x=end_date, color='green', linestyle=':', label='预测起始点')
@@ -204,7 +243,7 @@ def plot_stock_predictions(df_predictions, history_days=30, predict_days=10):
         # 设置图表属性
         plt.xlabel('日期')
         plt.ylabel('股票价格 (¥)')
-        plt.title('光大证券股票价格预测')
+        plt.title('股票价格预测')
         plt.grid(True)
         plt.legend()
         plt.xticks(rotation=45)
@@ -227,7 +266,13 @@ if __name__ == '__main__':
         'date': pd.date_range(start='2023-01-01', periods=100),
         'price': np.cumprod(1 + np.random.normal(0, 0.01, 100)) * 100
     }
-    df_predictions = pd.DataFrame(data)
+    df = pd.DataFrame(data)
+    
+    predictions = {
+        'date': pd.date_range(start='2023-04-11', periods=10),
+        'price': np.cumprod(1 + np.random.normal(0, 0.01, 10)) * 100
+    }
+    df_predictions = pd.DataFrame(predictions)
     
     # 测试可视化
-    plot_stock_predictions(df_predictions)
+    plot_stock_predictions(df, df_predictions)

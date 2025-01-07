@@ -9,10 +9,10 @@ logger = logging.getLogger(__name__)
 class SingleStockTradingEnv(gym.Env):
     def __init__(self, df, tech_indicator_list, initial_amount, hmax, buy_cost_pct, sell_cost_pct, reward_scaling, reward_func):
         super().__init__()
-        self.df = df.reset_index(drop=True)  # 确保索引从0开始
-        # 确保日期列存在
-        if 'date' not in self.df.columns:
+        # 确保日期列存在并设置为索引
+        if 'date' not in df.columns:
             raise ValueError("DataFrame必须包含日期列")
+        self.df = df.set_index('date')
         self.tech_indicator_list = tech_indicator_list
         self.initial_amount = initial_amount
         self.hmax = hmax
@@ -33,13 +33,13 @@ class SingleStockTradingEnv(gym.Env):
         self.last_action = None
         self.price_limit = 0.1
         # 添加价格数据
-        self.df_price = self.df[['date', 'close']].set_index('date')
+        self.df_price = self.df[['close']].copy()
         self._process_data()
 
     def reset(self):
         """重置环境状态"""
         self.day = 0
-        self.data = self.df.loc[self.day, :]
+        self.data = self.df.iloc[self.day, :]
         self.amount = self.initial_amount
         self.stocks = self.initial_stocks
         self.total_asset = self.amount + (self.stocks * self.data['close'])
@@ -66,6 +66,15 @@ class SingleStockTradingEnv(gym.Env):
             logger.error(f"处理数据失败: {str(e)}")
             raise
         
+    def _get_state(self):
+        """获取当前状态"""
+        state = [
+            self.amount,
+            *self.stocks,
+            *[float(x) for x in self.data[self.tech_indicator_list].values]
+        ]
+        return np.array(state, dtype=np.float32)
+
     def get_sb_env(self):
         """返回符合Stable-Baselines3接口的环境对象"""
         return self, self.reset()
@@ -94,7 +103,7 @@ class SingleStockTradingEnv(gym.Env):
             self.last_action = action
             
             self.day += 1
-            self.data = self.df.loc[self.day, :]
+            self.data = self.df.iloc[self.day, :]
             
             # 执行交易
             if action > 0:  # 买入
@@ -137,7 +146,7 @@ class SingleStockTradingEnv(gym.Env):
             
             done = self.day == len(self.df) - 1
             info = {
-                'date': self.data['date'],  # 添加日期信息
+                'date': self.data.name,  # 使用索引获取日期
                 'current_price': self.data['close']  # 添加当前价格信息
             }
             

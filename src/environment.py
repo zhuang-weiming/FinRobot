@@ -31,6 +31,7 @@ class AStockTradingEnv(gym.Env):
         self.price_limit = 0.1
         self.upper_limit = self.data.close * (1 + self.price_limit)
         self.lower_limit = self.data.close * (1 - self.price_limit)
+        self.last_value = self.initial_amount  # 添加last_value初始化
         self._process_data()
 
     def reset(self):
@@ -41,6 +42,7 @@ class AStockTradingEnv(gym.Env):
         self.stocks = self.initial_stocks
         self.total_asset = self.amount + (self.stocks * self.data.loc[self.day, 'close'])
         self.last_action = None
+        self.last_value = self.initial_amount  # 重置时更新last_value
         
         # 构建初始状态
         state = [
@@ -84,9 +86,51 @@ class AStockTradingEnv(gym.Env):
             
             self.day += 1
             self.data = self.df.loc[self.day, :]
+            
+            # 计算奖励
+            reward = self._calculate_reward(action)
+            return self._get_obs(), reward, self.day >= len(self.df), False, {}
         except Exception as e:
             logger.error(f"执行step失败: {str(e)}")
             raise
+
+    def _calculate_reward(self, action):
+        """改进的奖励函数，包含更多风险控制和性能评估指标"""
+        try:
+            # 计算当前账户价值
+            current_value = self.amount + np.sum(self.stocks * self.data['close'])
+            
+            # 计算账户价值变化
+            value_change = current_value - self.last_value
+            self.last_value = current_value
+            
+            # 计算夏普比率
+            returns = np.log(current_value / self.last_value) if self.last_value > 0 else 0
+            sharpe_ratio = returns / (np.std(self.stocks) + 1e-8)
+            
+            # 计算最大回撤
+            max_drawdown = max(0, (self.initial_amount - current_value) / self.initial_amount)
+            
+            # 计算风险调整因子
+            risk_adjustment = 1.0 - 0.5 * np.std(self.stocks)  # 根据持仓波动性调整奖励
+            risk_adjustment *= (1 - max_drawdown)  # 考虑最大回撤
+            
+            # 计算交易成本惩罚
+            transaction_cost = np.sum(np.abs(action)) * (self.buy_cost_pct + self.sell_cost_pct)
+            
+            # 计算最终奖励
+            reward = value_change * risk_adjustment * (1 + sharpe_ratio) - transaction_cost
+            
+            # 记录奖励计算细节
+            logger.debug(f"当前价值: {float(current_value):.2f}, 价值变化: {float(value_change):.2f}")
+            logger.debug(f"夏普比率: {float(sharpe_ratio):.4f}, 最大回撤: {float(max_drawdown):.4f}")
+            logger.debug(f"风险调整: {float(risk_adjustment):.4f}, 交易成本: {float(transaction_cost):.2f}")
+            logger.debug(f"最终奖励: {float(reward):.2f}")
+            
+            return reward * self.reward_scaling
+        except Exception as e:
+            logger.error(f"奖励计算失败: {str(e)}")
+            return 0  # 返回0奖励以避免训练中断
 
 def create_stock_env(train_df, test_df, processed_df, tech_indicator_list, initial_amount, hmax, buy_cost_pct, sell_cost_pct, reward_scaling, reward_func):
     """创建训练和测试环境"""

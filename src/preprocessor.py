@@ -7,6 +7,8 @@ logger = logging.getLogger(__name__)
 class DataPreprocessor:
     def __init__(self):
         self.scalers = {}  # 用于存储每个特征的标准化参数
+        self.mean_price = None
+        self.std_price = None
         
     def preprocess_data(self, raw_df, tech_indicator_list=None):
         """
@@ -45,8 +47,14 @@ class DataPreprocessor:
             # 计算技术指标
             processed_df = raw_df.copy()
             
-            # 保留原始价格数据
+            # 保留原始价格数据并进行复权处理
             processed_df['price'] = processed_df['close']
+            # 计算复权因子（假设数据已包含复权信息）
+            if 'factor' not in processed_df.columns:
+                logger.warning("未找到复权因子列，使用原始价格")
+            else:
+                processed_df['price'] = processed_df['close'] * processed_df['factor']
+                logger.info("已应用复权处理")
             
             # 确保数据足够计算技术指标
             if len(processed_df) < 30:
@@ -110,33 +118,205 @@ class DataPreprocessor:
             # 清理可能产生的NaN值
             processed_df = processed_df.dropna()
             
+            # 计算涨跌停价
+            processed_df['upper_limit'] = processed_df['close'].shift(1) * 1.1
+            processed_df['lower_limit'] = processed_df['close'].shift(1) * 0.9
+            
+            # 处理第一行的NaN值
+            processed_df['upper_limit'].iloc[0] = processed_df['close'].iloc[0] * 1.1
+            processed_df['lower_limit'].iloc[0] = processed_df['close'].iloc[0] * 0.9
+            
             logger.info("数据预处理完成")
             return processed_df
         except Exception as e:
             logger.error(f"数据预处理失败: {str(e)}")
             raise
 
+    def fit(self, df):
+        """
+        计算并存储价格数据的均值和标准差
+        
+        Args:
+            df (pd.DataFrame): 包含价格数据的DataFrame
+        """
+        if 'close' not in df.columns:
+            raise ValueError("输入数据缺少close列")
+            
+        # 计算均值和标准差
+        self.mean_price = df['close'].mean()
+        self.std_price = df['close'].std()
+        
+        # 处理标准差为0的情况
+        if self.std_price == 0:
+            self.std_price = 1.0
+            logger.warning("价格标准差为0，将使用1.0代替")
+            
+        logger.info(f"计算价格标准化参数: mean={self.mean_price}, std={self.std_price}")
+
     def standardize(self, df):
         """
         标准化数据，保存标准化参数用于反标准化
+        
+        Args:
+            df (pd.DataFrame): 输入数据
+            
+        Returns:
+            pd.DataFrame: 标准化后的数据
         """
-        for col in df.columns:
-            if col not in ['date', 'tic']:
-                self.scalers[col] = {
-                    'mean': df[col].mean(),
-                    'std': df[col].std()
-                }
-                df[col] = (df[col] - self.scalers[col]['mean']) / self.scalers[col]['std']
-        return df
+        try:
+            # 检查输入数据
+            if df.empty:
+                raise ValueError("输入数据为空")
+                
+            # 初始化标准化参数
+            self.scalers = {}
+            
+            # 对价格数据单独处理
+            price_cols = ['price', 'open', 'close', 'high', 'low']
+            other_cols = [col for col in df.columns if col not in ['date', 'tic'] + price_cols]
+            
+            # 标准化价格数据（使用对数收益率）
+            for col in price_cols:
+                if col in df.columns:
+                    # 计算对数收益率
+                    log_returns = np.log(df[col] / df[col].shift(1))
+                    log_returns = log_returns.fillna(0)
+                    
+                    # 计算均值和标准差
+                    mean = log_returns.mean()
+                    std = log_returns.std()
+                    
+                    # 处理标准差为0的情况
+                    if std == 0:
+                        std = 1.0
+                        logger.warning(f"列 {col} 的标准差为0，将使用1.0代替")
+                        
+                    # 保存标准化参数
+                    self.scalers[col] = {
+                        'mean': mean,
+                        'std': std,
+                        'last_price': df[col].iloc[-1]  # 保存最后一个价格用于反标准化
+                    }
+                    
+                    # 执行标准化
+                    df[col] = (log_returns - mean) / std
+            
+            # 标准化其他技术指标
+            for col in other_cols:
+                if col in df.columns:
+                    # 计算均值和标准差
+                    mean = df[col].mean()
+                    std = df[col].std()
+                    
+                    # 处理标准差为0的情况
+                    if std == 0:
+                        std = 1.0
+                        logger.warning(f"列 {col} 的标准差为0，将使用1.0代替")
+                        
+                    # 保存标准化参数
+                    self.scalers[col] = {
+                        'mean': mean,
+                        'std': std
+                    }
+                    
+                    # 执行标准化
+                    df[col] = (df[col] - mean) / std
+                    
+            logger.info("数据标准化完成")
+            return df
+        except Exception as e:
+            logger.error(f"数据标准化失败: {str(e)}")
+            raise
 
     def inverse_standardize(self, df):
         """
         反标准化数据，恢复原始值
+        
+        Args:
+            df (pd.DataFrame): 标准化后的数据
+            
+        Returns:
+            pd.DataFrame: 反标准化后的数据
         """
-        for col in df.columns:
-            if col in self.scalers:
-                df[col] = (df[col] * self.scalers[col]['std']) + self.scalers[col]['mean']
-        return df
+        try:
+            # 检查标准化参数是否存在
+            if not self.scalers:
+                raise ValueError("未找到标准化参数，请先执行standardize方法")
+                
+            # 检查输入数据
+            if df.empty:
+                raise ValueError("输入数据为空")
+                
+            # 对价格数据单独处理
+            price_cols = ['price', 'open', 'close', 'high', 'low']
+            other_cols = [col for col in df.columns if col not in ['date', 'tic'] + price_cols]
+            
+            # 反标准化价格数据
+            for col in price_cols:
+                if col in self.scalers:
+                    # 获取标准化参数
+                    mean = self.scalers[col]['mean']
+                    std = self.scalers[col]['std']
+                    last_price = self.scalers[col]['last_price']
+                    
+                    # 反标准化对数收益率
+                    log_returns = (df[col] * std) + mean
+                    
+                    # 计算实际价格
+                    prices = [last_price]
+                    for r in log_returns:
+                        prices.append(prices[-1] * np.exp(r))
+                    
+                    # 更新数据框
+                    df[col] = prices[1:]
+            
+            # 反标准化其他技术指标
+            for col in other_cols:
+                if col in self.scalers:
+                    # 获取标准化参数
+                    mean = self.scalers[col]['mean']
+                    std = self.scalers[col]['std']
+                    
+                    # 执行反标准化
+                    df[col] = (df[col] * std) + mean
+                    
+            logger.info("数据反标准化完成")
+            return df
+        except Exception as e:
+            logger.error(f"数据反标准化失败: {str(e)}")
+            raise
+
+    def save_scalers(self, filepath):
+        """
+        保存标准化参数到文件
+        
+        Args:
+            filepath (str): 文件路径
+        """
+        try:
+            import pickle
+            with open(filepath, 'wb') as f:
+                pickle.dump(self.scalers, f)
+            logger.info(f"标准化参数已保存到 {filepath}")
+        except Exception as e:
+            logger.error(f"保存标准化参数失败: {str(e)}")
+            raise
+
+    def load_scalers(self, filepath):
+        """
+        从文件加载标准化参数
+        
+        Args:
+            filepath (str): 文件路径
+        """
+        try:
+            import pickle
+            with open(filepath, 'rb') as f:
+                self.scalers = pickle.load(f)
+            logger.info(f"已从 {filepath} 加载标准化参数")
+        except Exception as e:
+            logger.error(f"加载标准化参数失败: {str(e)}")
+            raise
 
 def split_data(df, train_start_date, train_end_date, test_start_date, test_end_date):
     """

@@ -2,6 +2,7 @@ import sys
 import os
 import logging
 import pandas as pd
+import copy
 import numpy as np
 from datetime import timedelta
 
@@ -27,11 +28,11 @@ preprocessor = DataPreprocessor()
 # 配置参数
 stock_code = '601788'  # 光大证券
 start_date = '20220101'  # 扩展数据范围
-end_date = '20231231'    # 使用真实历史数据
+end_date = '20250116'    # 包含预测所需日期
 train_start_date = '2022-01-01'
-train_end_date = '2022-12-31'
-test_start_date = '2023-01-01'
-test_end_date = '2023-06-30'
+train_end_date = '2024-12-31'
+test_start_date = '2025-01-01'
+test_end_date = '2025-01-16'
 tech_indicator_list = ["macd", "rsi", "cci", "dx"]
 initial_amount = 1000000
 hmax = 100
@@ -53,6 +54,9 @@ raw_df.index = pd.to_datetime(raw_df.index)
 
 # 2. 数据预处理和特征工程
 processed_df = preprocessor.preprocess_data(raw_df, tech_indicator_list=tech_indicator_list)
+
+# 2.1 计算标准化参数
+preprocessor.fit(processed_df)
 
 # 3. 标准化数据
 processed_df = preprocessor.standardize(processed_df)
@@ -99,58 +103,68 @@ except Exception as e:
 try:
     # 7. 使用训练好的 Agent 进行未来10天预测
     logger.info("开始使用训练好的Agent进行未来10天预测...")
+    env_trade = copy.deepcopy(env_trade)
     
-    # 调试信息：打印env_trade对象类型和属性
-    logger.info(f"env_trade类型: {type(env_trade)}")
-    logger.info(f"env_trade属性: {dir(env_trade)}")
+    # 获取历史数据的最后一天作为预测起始点
+    last_date = env_trade.df.index[-1]
+    logger.info(f"历史数据最后一天: {last_date}")
     
-    # 获取测试环境的初始状态
-    state = env_trade.reset()
+    # 生成未来10个交易日
+    future_dates = pd.bdate_range(start=last_date + pd.Timedelta(days=1), periods=10)
+    logger.info(f"生成的预测日期: {future_dates}")
     
     future_prices = []
-    
-    for _ in range(10):  # 预测未来10天
-        action = trained_ddpg_model.predict(state)
-        
-        # 执行一个虚拟步骤以获取下一个状态和预测价格
-        obs, reward, terminated, info = env_trade.step(action)
-        
-        # 假设 info 中包含了当天的价格信息
-        if 'current_price' in info:
+    valid_dates = []
+
+    # 重置环境到历史数据最后一天
+    env_trade.current_step = len(env_trade.df) - 1
+    logger.info(f"重置环境到第 {env_trade.current_step} 步")
+
+    # 检查环境状态
+    if not hasattr(env_trade, 'df') or env_trade.df is None:
+        raise ValueError("交易环境数据未正确初始化")
+    if not hasattr(env_trade, 'current_step'):
+        raise ValueError("交易环境current_step未正确初始化")
+
+    # 进行预测
+    for date in future_dates:
+        try:
+            state = env_trade._get_state()
+            action = trained_ddpg_model.predict(state)[0]
+            obs, reward, done, info = env_trade.step(action)
+            
+            # 检查预测结果
+            if 'current_price' not in info:
+                raise ValueError("预测结果缺少价格信息")
+                
             future_prices.append(info['current_price'])
-        else:
-            logger.warning("环境中没有提供当前价格信息。")
-            break
-        
-        state = obs
-        
-        if terminated:
-            break
+            valid_dates.append(date)
+            
+            if done:
+                logger.warning("环境终止，结束预测")
+                break
+        except Exception as e:
+            logger.error(f"预测步骤出错: {str(e)}")
+            raise
+
+    # 创建预测数据DataFrame
+    df_predictions = pd.DataFrame({
+        'date': valid_dates,
+        'price': future_prices
+    })
     
-    if future_prices:
-        # 确保test_df.index是datetime格式并正确转换
-        test_df.index = pd.to_datetime(test_df.index, format='%Y-%m-%d', errors='coerce').floor('D')
-        # 验证日期格式
-        if test_df.index.isnull().any():
-            logger.error("日期格式转换失败，请检查数据源")
-            raise ValueError("日期格式转换失败")
-        # 获取最后一个有效日期
-        last_date = test_df.index[-1]
-        logger.info(f"最后一个有效日期: {last_date}")
-        # 生成未来日期序列，使用正确的基准日期
-        future_dates = pd.date_range(
-            start=last_date + timedelta(days=1),
-            periods=len(future_prices),
-            freq='B'  # 只生成工作日
-        )
-        # 创建预测结果DataFrame
-        df_future_prices = pd.DataFrame({
-            'date': future_dates,
-            'price': future_prices
-        })
-        logger.info(f"未来10天预测价格:\n{df_future_prices}")
-    else:
-        logger.warning("未能获取到未来价格预测。")
+    # 确保日期索引正确
+    df_predictions['date'] = pd.to_datetime(df_predictions['date'])
+    df_predictions.set_index('date', inplace=True)
+    
+    # 反标准化预测价格
+    if hasattr(preprocessor, 'mean_price') and hasattr(preprocessor, 'std_price'):
+        df_predictions['price'] = (
+            df_predictions['price'] * preprocessor.std_price
+        ) + preprocessor.mean_price
+        logger.info("已对预测价格进行反标准化处理")
+    
+    logger.info(f"未来10天预测价格:\n{df_predictions}")
 
 except Exception as e:
     logger.error(f"预测失败: {str(e)}")
@@ -177,13 +191,31 @@ try:
     # 确保日期格式正确
     df_results['date'] = pd.to_datetime(df_results.index)
     
-    # 创建回测数据DataFrame
-    df_predictions = df_results[['date', 'price']].copy()
-
+    # 准备历史数据
+    history_df = test_df[['close', 'upper_limit', 'lower_limit']].copy()
+    history_df = history_df.rename(columns={'close': 'price'})
+    history_df['date'] = history_df.index
+    history_df['is_prediction'] = False
+    
+    # 准备预测数据
+    df_predictions = df_predictions.reset_index()
+    df_predictions['is_prediction'] = True
+    # 预测数据的涨跌停价设置为NaN
+    df_predictions['upper_limit'] = np.nan
+    df_predictions['lower_limit'] = np.nan
+    
+    # 合并数据
+    combined_df = pd.concat([
+        history_df[['date', 'price', 'upper_limit', 'lower_limit', 'is_prediction']],
+        df_predictions[['date', 'price', 'upper_limit', 'lower_limit', 'is_prediction']]
+    ])
+    
+    # 确保日期格式一致
+    combined_df['date'] = pd.to_datetime(combined_df['date'])
+    combined_df = combined_df.sort_values('date')
+    
     # 可视化预测结果
-    history_days = 30  # 显示最近30天历史数据
-    predict_days = 10  # 显示未来10天预测
-    plot_stock_predictions(df_predictions, history_days, predict_days)
+    plot_stock_predictions(combined_df, history_days=30, predict_days=10, preprocessor=preprocessor)
     logger.info("股票价格预测可视化完成")
 
 except Exception as e:

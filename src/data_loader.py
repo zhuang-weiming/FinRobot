@@ -9,7 +9,7 @@ import urllib3
 import os
 import hashlib
 import pickle
-from datetime import datetime
+from datetime import datetime, timedelta
 
 # 禁用SSL证书验证
 ssl._create_default_https_context = ssl._create_unverified_context
@@ -27,6 +27,8 @@ def create_session():
         allowed_methods=["GET", "POST"],
         raise_on_status=False
     )
+    # 禁用SSL验证
+    session.verify = False
     adapter = HTTPAdapter(
         max_retries=retries,
         pool_connections=100,
@@ -40,11 +42,18 @@ def create_session():
     
     return session
 
+def is_cache_expired(file_path, max_age_days=7):
+    """检查缓存是否过期"""
+    if not os.path.exists(file_path):
+        return True
+    file_modified_time = datetime.fromtimestamp(os.path.getmtime(file_path))
+    return (datetime.now() - file_modified_time) > timedelta(days=max_age_days)
+
 def get_cache_filename(stock_code, start_date, end_date):
     """生成缓存文件名"""
-    cache_key = f"{stock_code}_{start_date}_{end_date}"
+    cache_key = f"{stock_code}_{start_date}_{end_date}_{datetime.now().strftime('%Y%m%d%H%M')}"
     hash_key = hashlib.md5(cache_key.encode()).hexdigest()
-    return os.path.join("data_cache", f"{hash_key}.pkl")
+    return os.path.join("data_cache", f"{hash_key}")
 
 def load_stock_data(stock_code, start_date, end_date):
     """
@@ -64,12 +73,19 @@ def load_stock_data(stock_code, start_date, end_date):
         raise ValueError("stock_code cannot be empty")
 
     # 检查缓存
-    cache_file = get_cache_filename(stock_code, start_date, end_date)
-    if os.path.exists(cache_file):
+    cache_base = get_cache_filename(stock_code, start_date, end_date)
+    pkl_file = f"{cache_base}.pkl"
+    csv_file = f"{cache_base}.csv"
+    
+    if os.path.exists(pkl_file) and os.path.exists(csv_file):
         try:
-            with open(cache_file, "rb") as f:
-                logger.info(f"从缓存加载数据: {cache_file}")
-                return pickle.load(f)
+             if not is_cache_expired(pkl_file):
+                with open(pkl_file, "rb") as f:
+                    logger.info(f"从缓存加载数据: {pkl_file}")
+                    data = pickle.load(f)
+                    return data
+             else:
+                logger.info(f"缓存已过期，重新下载数据: {pkl_file}")
         except Exception as e:
             logger.warning(f"缓存加载失败: {str(e)}")
 
@@ -123,10 +139,9 @@ def load_stock_data(stock_code, start_date, end_date):
         except Exception as e:
             logger.error(f"获取数据失败: {str(e)}")
             # 尝试从缓存加载
-            cache_file = f"data_cache/{stock_code}_{start_date}_{end_date}.csv"
-            if os.path.exists(cache_file):
-                logger.info(f"从缓存文件 {cache_file} 加载数据")
-                df = pd.read_csv(cache_file)
+            if os.path.exists(csv_file):
+                logger.info(f"从缓存文件 {csv_file} 加载数据")
+                df = pd.read_csv(csv_file)
             else:
                 raise ValueError(f"无法获取数据且无缓存可用: {str(e)}")
         
@@ -141,7 +156,7 @@ def load_stock_data(stock_code, start_date, end_date):
             "日期": "date"
         }, inplace=True)
         
-        df["date"] = pd.to_datetime(df["date"]).dt.strftime('%Y-%m-%d')
+        df["date"] = pd.to_datetime(df["date"], format='%Y-%m-%d').dt.strftime('%Y-%m-%d')
         df = df[["date", "open", "close", "high", "low", "volume", "tic"]]
         
         logger.info(f"成功加载股票数据，代码: {stock_code}, 记录数: {len(df)}")
@@ -149,9 +164,15 @@ def load_stock_data(stock_code, start_date, end_date):
         # 保存到缓存
         try:
             os.makedirs("data_cache", exist_ok=True)
-            with open(cache_file, "wb") as f:
+            # 保存为pkl文件
+            with open(pkl_file, "wb") as f:
                 pickle.dump(df, f)
-                logger.info(f"数据已缓存到: {cache_file}")
+                logger.info(f"数据已缓存到: {pkl_file}")
+                
+            # 保存为csv文件
+            df.to_csv(csv_file, index=False)
+            logger.info(f"已将数据保存为CSV文件: {csv_file}")
+                
         except Exception as e:
             logger.warning(f"缓存保存失败: {str(e)}")
             
