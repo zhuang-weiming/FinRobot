@@ -197,6 +197,17 @@ class DDPGAgent:
         
         return stats
     
+    def load(self, path):
+        """加载训练好的模型参数"""
+        checkpoint = torch.load(path, weights_only=False)
+        self.actor.load_state_dict(checkpoint['actor'])
+        self.actor_target.load_state_dict(checkpoint['actor_target'])
+        self.critic.load_state_dict(checkpoint['critic'])
+        self.critic_target.load_state_dict(checkpoint['critic_target'])
+        self.actor_optimizer.load_state_dict(checkpoint['actor_optimizer'])
+        self.critic_optimizer.load_state_dict(checkpoint['critic_optimizer'])
+        logger.info(f"成功加载模型参数: {path}")
+
     def update(self):
         # 计算优先级
         if len(self.priorities) != len(self.replay_buffer):

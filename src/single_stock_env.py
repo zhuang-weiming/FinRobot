@@ -29,11 +29,11 @@ class SingleStockTradingEnv(gym.Env):
         self.initial_stocks = np.zeros(self.stock_dim, dtype=np.float32)
         self.amount = self.initial_amount
         self.stocks = self.initial_stocks
-        self.total_asset = self.amount + (self.stocks * self.data['close'])
+        self.total_asset = self.amount + (self.stocks * self.data['收盘价'])
         self.last_action = None
         self.price_limit = 0.1
         # 添加价格数据
-        self.df_price = self.df[['close']].copy()
+        self.df_price = self.df[['收盘价']].copy()
         self._process_data()
 
     def reset(self):
@@ -42,7 +42,7 @@ class SingleStockTradingEnv(gym.Env):
         self.data = self.df.iloc[self.day, :]
         self.amount = self.initial_amount
         self.stocks = self.initial_stocks
-        self.total_asset = self.amount + (self.stocks * self.data['close'])
+        self.total_asset = self.amount + (self.stocks * self.data['收盘价'])
         self.last_action = None
         
         # 构建初始状态
@@ -55,13 +55,13 @@ class SingleStockTradingEnv(gym.Env):
 
     def get_account_value(self):
         """获取当前账户价值"""
-        return self.amount + (self.stocks * self.data['close'])
+        return self.amount + (self.stocks * self.data['收盘价'])
 
     def _process_data(self):
         """处理数据，添加涨跌停标志"""
         try:
-            self.df['upper_limit'] = self.df['close'].shift(1) * (1 + self.price_limit)
-            self.df['lower_limit'] = self.df['close'].shift(1) * (1 - self.price_limit)
+            self.df['upper_limit'] = self.df['收盘价'].shift(1) * (1 + self.price_limit)
+            self.df['lower_limit'] = self.df['收盘价'].shift(1) * (1 - self.price_limit)
         except Exception as e:
             logger.error(f"处理数据失败: {str(e)}")
             raise
@@ -87,7 +87,7 @@ class SingleStockTradingEnv(gym.Env):
                 action = 0
                 
             # 涨跌停限制
-            current_price = self.data['close']
+            current_price = self.data['收盘价']
             upper_limit = self.data['upper_limit']
             lower_limit = self.data['lower_limit']
             
@@ -108,17 +108,17 @@ class SingleStockTradingEnv(gym.Env):
             # 执行交易
             if action > 0:  # 买入
                 buy_amount = min(action, self.hmax)
-                cost = buy_amount * self.data['close'] * (1 + self.buy_cost_pct)
+                cost = buy_amount * self.data['收盘价'] * (1 + self.buy_cost_pct)
                 if self.amount >= cost:
                     self.stocks += buy_amount
                     self.amount -= cost
             elif action < 0:  # 卖出
                 sell_amount = min(abs(action), self.stocks)
                 self.stocks -= sell_amount
-                self.amount += sell_amount * self.data['close'] * (1 - self.sell_cost_pct)
+                self.amount += sell_amount * self.data['收盘价'] * (1 - self.sell_cost_pct)
             
             # 计算新的总资产
-            new_total_asset = self.amount + (self.stocks * self.data['close'])
+            new_total_asset = self.amount + (self.stocks * self.data['收盘价'])
             
             # 计算收益率
             returns = (new_total_asset - self.total_asset) / (self.total_asset + 1e-9)
@@ -126,7 +126,7 @@ class SingleStockTradingEnv(gym.Env):
             # 改进的奖励函数
             reward = returns * self.reward_scaling  # 基础收益
             reward -= 0.01 * abs(action)  # 交易频率惩罚
-            reward -= 0.1 * (self.stocks * self.data['close']) / new_total_asset  # 持仓风险惩罚
+            reward -= 0.1 * (self.stocks * self.data['收盘价']) / new_total_asset  # 持仓风险惩罚
             
             # 确保reward有合理值
             if np.isnan(reward) or np.isinf(reward):
@@ -134,11 +134,11 @@ class SingleStockTradingEnv(gym.Env):
                 
             # 加入交易成本惩罚
             if action != 0:
-                transaction_cost = abs(action) * self.data['close'] * (self.buy_cost_pct if action > 0 else self.sell_cost_pct)
+                transaction_cost = abs(action) * self.data['收盘价'] * (self.buy_cost_pct if action > 0 else self.sell_cost_pct)
                 reward -= transaction_cost
                 
             # 加入持仓风险控制
-            position_ratio = abs(self.stocks * self.data['close']) / new_total_asset
+            position_ratio = abs(self.stocks * self.data['收盘价']) / new_total_asset
             if position_ratio > 0.8:  # 持仓超过80%时惩罚
                 reward -= 0.1 * position_ratio
                 
@@ -147,7 +147,7 @@ class SingleStockTradingEnv(gym.Env):
             done = self.day == len(self.df) - 1
             info = {
                 'date': self.data.name,  # 使用索引获取日期
-                'current_price': self.data['close']  # 添加当前价格信息
+                'current_price': self.data['收盘价']  # 添加当前价格信息
             }
             
             # 构建新的状态
