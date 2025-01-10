@@ -58,3 +58,4 @@ best_model/*
 *.pth
 *.ckpt
 data_cache/
+ppo_stock_model.zip
