@@ -43,3 +43,17 @@ best_model/
 # OS
 .DS_Store
 Thumbs.db
+
+# Training artifacts
+model_checkpoints/
+ppo_stock_tensorboard/
+logs/*
+!logs/README.md
+best_model/*
+!best_model/README.md
+
+# Large files
+*.zip
+*.h5
+*.pth
+*.ckpt
