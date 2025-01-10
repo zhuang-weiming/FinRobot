@@ -1,73 +1,128 @@
 from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import DummyVecEnv
 from stable_baselines3.common.callbacks import EvalCallback
+from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
 from data_loader import StockDataLoader
 from environment.environment_trading import StockTradingEnvironment
 import torch.nn as nn
+import torch
+import gym
 import numpy as np
+
+class CustomFeatureExtractor(BaseFeaturesExtractor):
+    def __init__(self, observation_space: gym.spaces.Box, features_dim: int = 64):
+        super().__init__(observation_space, features_dim)
+        
+        # 获取输入维度
+        self.lookback_window = observation_space.shape[0]
+        self.n_features = observation_space.shape[1]
+        
+        # 特征标准化层
+        self.layer_norm = nn.LayerNorm(self.n_features)
+        
+        # 简单的前馈网络
+        self.net = nn.Sequential(
+            nn.Linear(self.n_features * self.lookback_window, 256),
+            nn.ReLU(),
+            nn.LayerNorm(256),
+            nn.Linear(256, 128),
+            nn.ReLU(),
+            nn.LayerNorm(128),
+            nn.Linear(128, features_dim),
+            nn.Tanh()  # 使用 tanh 确保输出范围在 [-1, 1]
+        )
+        
+        # 初始化权重
+        self.apply(self._init_weights)
+    
+    def _init_weights(self, module):
+        if isinstance(module, nn.Linear):
+            nn.init.orthogonal_(module.weight, gain=np.sqrt(2))
+            module.bias.data.zero_()
+    
+    def forward(self, observations: torch.Tensor) -> torch.Tensor:
+        # 确保输入是浮点型
+        observations = observations.float()
+        
+        # 应用层标准化
+        observations = self.layer_norm(observations)
+        
+        # 展平输入
+        batch_size = observations.size(0)
+        flattened = observations.view(batch_size, -1)
+        
+        # 通过网络
+        features = self.net(flattened)
+        
+        return features
 
 def train_ppo_model():
     try:
         # Load and split data
-        loader = StockDataLoader('601788')  # 光大证券的股票代码
+        loader = StockDataLoader('601788')
         train_df, test_df = loader.load_and_split_data(
             start_date='20200102',
             end_date='20231229',
             train_ratio=0.8
         )
         
-        # Create environment with training data
+        # Create environment
         env = DummyVecEnv([lambda: StockTradingEnvironment(train_df)])
         eval_env = DummyVecEnv([lambda: StockTradingEnvironment(test_df)])
         
-        # Initialize model with improved parameters for A股特点
+        # Initialize model
         model = PPO(
             "MlpPolicy", 
             env, 
             verbose=1,
             learning_rate=0.0001,
-            n_steps=2048,
-            batch_size=256,
-            n_epochs=10,
+            n_steps=1024,
+            batch_size=64,  # 进一步减小批量大小
+            n_epochs=5,     # 减少训练轮数
             gamma=0.99,
             gae_lambda=0.95,
             clip_range=0.2,
-            ent_coef=0.02,
-            max_grad_norm=0.5,
+            ent_coef=0.005, # 减小熵系数
+            max_grad_norm=0.3, # 进一步限制梯度
             tensorboard_log="./ppo_stock_tensorboard/",
             policy_kwargs=dict(
-                # 使用更深的网络
                 net_arch=dict(
-                    pi=[256, 256, 128, 64],  # 加深策略网络
-                    vf=[256, 256, 128, 64]   # 加深价值网络
+                    pi=[32, 32],  # 使用更小的网络
+                    vf=[32, 32]
                 ),
-                # 添加激活函数
-                activation_fn=nn.ReLU
+                activation_fn=nn.ReLU,
+                features_extractor_class=CustomFeatureExtractor,
+                features_extractor_kwargs=dict(features_dim=32),
+                optimizer_class=torch.optim.AdamW,
+                optimizer_kwargs=dict(
+                    weight_decay=0.001  # 减小权重衰减
+                )
             )
         )
         
-        # 创建回调函数用于评估和保存最佳模型
+        # 创建回调函数
         eval_callback = EvalCallback(
             eval_env,
             best_model_save_path='./best_model/',
             log_path='./logs/',
-            eval_freq=5000,
+            eval_freq=2500,
+            n_eval_episodes=5,
             deterministic=True,
             render=False
         )
         
         # 训练模型
-        total_timesteps = 1000000
+        total_timesteps = 200000
         model.learn(
             total_timesteps=total_timesteps,
             callback=eval_callback,
             progress_bar=True
         )
         
-        # 保存最终模型
+        # 保存模型
         model.save("ppo_stock_model")
         
-        # 评估最终模型
+        # 评估模型
         mean_reward = evaluate_model(model, eval_env)
         
         return model, env
@@ -86,7 +141,6 @@ def evaluate_model(model, env, num_episodes=5):
         
         while not done:
             action, _ = model.predict(obs, deterministic=True)
-            # DummyVecEnv returns (obs, reward, done, info) instead of (obs, reward, terminated, truncated, info)
             step_result = env.step(action)
             obs = step_result[0]
             reward = step_result[1]

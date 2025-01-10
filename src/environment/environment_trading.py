@@ -67,9 +67,12 @@ class StockTradingEnvironment(gym.Env):
         """Calculate reward based on position and price change"""
         current_price = float(self.df.iloc[self.current_step]['close'])
         next_price = float(self.df.iloc[self.current_step + 1]['close'])
-        price_change = (next_price - current_price) / current_price
         
-        # 基础收益
+        # 使用安全的收益率计算
+        price_change = (next_price - current_price) / (current_price + 1e-6)
+        price_change = np.clip(price_change, -0.1, 0.1)  # 限制价格变化范围
+        
+        # 基础收益（使用安全的计算方式）
         position_reward = self.position * price_change
         
         # 趋势奖励
@@ -80,41 +83,40 @@ class StockTradingEnvironment(gym.Env):
         trend_reward = 0.0
         if ma5 > ma20:  # 上升趋势
             if action > 0:  # 买入
-                trend_reward = 0.002
-            elif self.position > 0:  # 持有
                 trend_reward = 0.001
+            elif self.position > 0:  # 持有
+                trend_reward = 0.0005
         else:  # 下降趋势
             if action == 0 and self.position == 0:  # 空仓
-                trend_reward = 0.001
+                trend_reward = 0.0005
         
         # RSI指标奖励
         rsi_reward = 0.0
         if rsi < 30 and action > 0:  # 超卖区域买入
-            rsi_reward = 0.002
-        elif rsi > 70 and action == 0:  # 超买区域观望
             rsi_reward = 0.001
+        elif rsi > 70 and action == 0:  # 超买区域观望
+            rsi_reward = 0.0005
         
-        # 持仓量奖励
+        # 持仓量奖励（使用平滑的奖励函数）
         position_size_reward = 0.0
-        if 0.3 <= self.position <= 0.7:  # 鼓励适度持仓
-            position_size_reward = 0.001
+        optimal_position = 0.5
+        position_diff = abs(self.position - optimal_position)
+        position_size_reward = 0.0005 * (1 - position_diff)
         
         # 交易成本
         transaction_cost = 0.0
         if action > 0:
             transaction_cost = action * self.transaction_cost_pct
-            if action > 0.5:  # 大额交易惩罚
-                transaction_cost *= 1.5
         
-        # 组合所有奖励
+        # 组合所有奖励（使用较小的权重以避免数值不稳定）
         reward = (
-            position_reward * 1.0 +  # 基础收益权重最大
-            trend_reward * 0.5 +     # 趋势奖励
-            rsi_reward * 0.3 +       # RSI指标奖励
-            position_size_reward * 0.2  # 持仓量奖励
+            position_reward * 1.0 +
+            trend_reward * 0.3 +
+            rsi_reward * 0.2 +
+            position_size_reward * 0.1
         ) - transaction_cost
         
-        # 限制最大损失和收益
+        # 使用 clip 限制奖励范围
         reward = np.clip(reward, -0.1, 0.1)
         
         return float(reward)
