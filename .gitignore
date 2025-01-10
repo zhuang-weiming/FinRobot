@@ -56,4 +56,4 @@ best_model/*
 *.zip
 *.h5
 *.pth
-*.ckpt
+*.ckptdata_cache/
