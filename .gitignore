@@ -4,7 +4,6 @@ __pycache__/
 *$py.class
 *.so
 .Python
-env/
 build/
 develop-eggs/
 dist/
@@ -23,6 +22,7 @@ wheels/
 
 # Virtual Environment
 venv/
+env/
 ENV/
 
 # IDE
@@ -31,19 +31,25 @@ ENV/
 *.swp
 *.swo
 
-# Project specific
+# Logs and databases
+*.log
+*.sqlite
 logs/
-tensorboard_logs/
+*.db
+
+# Model checkpoints and results
+checkpoints/
 best_model/
 results/
-*.png
-*.csv
-*.zip
 *.h5
+*.pth
 *.pt
 
-# Core code changes
-*.pyc
+# OS
 .DS_Store
-ppo_stock_tensorboard/
-*.log
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db

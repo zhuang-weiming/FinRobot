@@ -13,7 +13,8 @@ from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.policies import ActorCriticPolicy
 
 from data_loader import StockDataLoader
-from environment.environment_trading import StockTradingEnvironment
+from environment.environment_trading import StockTradingEnvironment, RewardScaler
+from utils.config_manager import ConfigManager
 
 import torch.nn as nn
 import torch
@@ -22,6 +23,8 @@ import numpy as np
 import time
 import traceback
 import os
+import pandas as pd
+import yaml
 
 class CustomFeatureExtractor(BaseFeaturesExtractor):
     def __init__(self, observation_space: gym.spaces.Box, features_dim: int = 128):
@@ -46,10 +49,71 @@ class CustomFeatureExtractor(BaseFeaturesExtractor):
         return self.feature_net(observations.float().reshape(observations.shape[0], -1))
 
 class ImprovedEarlyStoppingCallback(BaseCallback):
-    def __init__(self):
-        super().__init__()
-        self.patience = 100          # 减少耐心值
-        self.min_improvement = 0.01  # 增加改进阈值
+    """改进的早停回调"""
+    def __init__(
+        self,
+        check_freq: int = 1000,
+        patience: int = 5,
+        min_improvement: float = 0.01,
+        reward_threshold: float = 1000.0,
+        std_threshold: float = 2.0,
+        verbose: int = 1
+    ):
+        super().__init__(verbose)
+        self.check_freq = check_freq
+        self.patience = patience
+        self.min_improvement = min_improvement
+        self.reward_threshold = reward_threshold
+        self.std_threshold = std_threshold
+        self.best_mean_reward = -np.inf
+        self.no_improvement_count = 0
+        self.reward_history = []
+        
+    def _on_step(self) -> bool:
+        if self.n_calls % self.check_freq == 0:
+            # 获取最近的奖励
+            rewards = [ep_info["r"] for ep_info in self.model.ep_info_buffer]
+            mean_reward = np.mean(rewards)
+            std_reward = np.std(rewards)
+            
+            self.reward_history.append(mean_reward)
+            
+            # 1. 检查奖励改善
+            improvement = (mean_reward - self.best_mean_reward) / (abs(self.best_mean_reward) + 1e-8)
+            
+            # 2. 检查奖励波动性
+            is_unstable = std_reward > self.std_threshold * np.mean(np.abs(rewards))
+            
+            # 3. 检查奖励发散
+            is_diverging = mean_reward > self.reward_threshold
+            
+            if self.verbose > 0:
+                print(f"\nEarly Stopping Check:")
+                print(f"Mean reward: {mean_reward:.2f} ± {std_reward:.2f}")
+                print(f"Improvement: {improvement:.2%}")
+                print(f"Stability: {'Unstable' if is_unstable else 'Stable'}")
+            
+            if improvement > self.min_improvement and not is_unstable:
+                self.best_mean_reward = mean_reward
+                self.no_improvement_count = 0
+            else:
+                self.no_improvement_count += 1
+            
+            # 停止条件
+            if (self.no_improvement_count >= self.patience or 
+                is_unstable or 
+                is_diverging):
+                if self.verbose > 0:
+                    print("Early stopping triggered!")
+                    if self.no_improvement_count >= self.patience:
+                        print("Reason: No improvement")
+                    elif is_unstable:
+                        print("Reason: Training unstable")
+                    else:
+                        print("Reason: Rewards diverging")
+                return False
+                
+        return True
 
 # 添加自定义网络架构
 class CustomActorCriticPolicy(ActorCriticPolicy):
@@ -110,167 +174,126 @@ def improved_lr_schedule(progress_remaining: float) -> float:
         progress = (0.7 - progress_remaining) / 0.7
         return min_lr + (initial_lr - min_lr) * (1 + np.cos(np.pi * progress)) / 2
 
-def make_env(df, is_training=True):
-    """Create a wrapped environment"""
-    def _init():
-        env = StockTradingEnvironment(df, training=is_training)
-        env = Monitor(
-            env,
-            filename=None,
-            allow_early_resets=True
-        )
-        return env
-    return _init
+def create_env(df: pd.DataFrame, training: bool = True) -> gym.Env:
+    """创建交易环境"""
+    # 创建配置对象
+    config = ConfigManager.DEFAULT_CONFIG
+    
+    # 创建环境实例
+    env = StockTradingEnvironment(
+        df=df,
+        config=config,  # 通过config传递参数
+        training=training
+    )
+    return env
 
-def train_ppo_model():
+def train_ppo_model(env: gym.Env, config: dict) -> PPO:
+    """训练PPO模型"""
+    model = PPO(
+        "MlpPolicy",
+        env,
+        learning_rate=config['training']['learning_rate'],
+        n_steps=config['training']['n_steps'],
+        batch_size=config['training']['batch_size'],
+        policy_kwargs={"net_arch": config['training']['network']['hidden_sizes']},
+        verbose=1
+    )
+    
     try:
-        # 创建必要的目录
-        os.makedirs("./best_model", exist_ok=True)
-        os.makedirs("./logs", exist_ok=True)
-        os.makedirs("./checkpoints", exist_ok=True)
-        os.makedirs("./tensorboard_logs", exist_ok=True)
-        
-        # Load and split data
-        loader = StockDataLoader('300059')
-        print("Loading and preprocessing data...")
-        train_df, test_df = loader.load_and_split_data(
-            start_date='20200102',
-            end_date='20241231',
-            train_ratio=0.8
+        model.learn(
+            total_timesteps=config['training']['total_timesteps'],
+            progress_bar=True
         )
-        print("Data preprocessing completed successfully")
-        
-        # Create environments with Monitor wrapper
-        print("Creating training environment...")
-        env = DummyVecEnv([make_env(train_df, True)])
-        print("Creating evaluation environment...")
-        eval_env = DummyVecEnv([make_env(test_df, False)])
-        
-        # 优化的网络架构
-        policy_kwargs = dict(
-            net_arch=dict(
-                pi=[128, 128, 64],    # 保持深度，减少宽度
-                vf=[128, 128, 64]     # 同样的结构用于值函数
-            ),
-            activation_fn=nn.ReLU,
-            log_std_init=-2.0,
-            ortho_init=True,
-            # 移除不支持的参数
-            # normalize_observations=True,
-            # normalize_returns=True
-        )
-        
-        # 优化的模型配置
-        model = PPO(
-            CustomActorCriticPolicy,
-            env,
-            learning_rate=3e-5,          # 降低学习率
-            n_steps=2048,                # 减小步长
-            batch_size=128,              # 减小批量
-            gamma=0.99,
-            gae_lambda=0.95,
-            clip_range=0.1,             # 减小裁剪范围
-            clip_range_vf=0.1,          # 添加值函数裁剪
-            ent_coef=0.005,             # 降低熵系数
-            max_grad_norm=0.5,          # 添加梯度裁剪
-            target_kl=0.01,             # 添加KL散度目标
-            policy_kwargs=dict(
-                net_arch=dict(
-                    pi=[128, 128, 64],   # 简化策略网络
-                    vf=[128, 128, 64]    # 简化值函数网络
-                )
-            )
-        )
-        
-        print("\nTraining Configuration:")
-        print("- Total timesteps:", 500_000)  # 增加训练步数
-        print("- Batch size:", 256)
-        print("- Learning rate:", 3e-4)
-        print("- Network architecture:", "256-256-128")
-        print("- Target KL:", 0.015)
-        print("\nStarting training...")
-        
-        # 修改回调配置
-        callbacks = [
-            EvalCallback(
-                eval_env,
-                best_model_save_path="./best_model/",
-                log_path="./logs/",
-                eval_freq=5000,
-                n_eval_episodes=20,  # 增加评估轮数
-                deterministic=True,
-                verbose=1
-            ),
-            CheckpointCallback(
-                save_freq=20000,    # 增加保存频率
-                save_path="./checkpoints/",
-                name_prefix="ppo_stock_model",
-                verbose=1
-            ),
-            RewardMonitorCallback(
-                check_freq=1000,
-                min_reward=-5.0,
-                window_size=200     # 增加窗口大小
-            ),
-            ImprovedEarlyStoppingCallback(
-                check_freq=2000,
-                patience=150,
-                min_evals=300,
-                min_improvement=0.000005,
-                verbose=1
-            )
-        ]
-        
-        # 使用 CallbackList 包装所有回调
-        callback = CallbackList(callbacks)
-        
-        # 训练模型
-        try:
-            model.learn(
-                total_timesteps=500_000,
-                callback=callback,
-                progress_bar=True,
-                log_interval=10
-            )
-            print("\nTraining completed successfully")
-        except Exception as e:
-            print(f"\nError during training: {str(e)}")
-            traceback.print_exc()
-            return None, None, None
-            
-        return model, env, eval_env
-        
     except Exception as e:
-        print(f"Error in training setup: {str(e)}")
+        print(f"Error during training: {str(e)}")
         traceback.print_exc()
-        return None, None, None
+    
+    return model
 
-def evaluate_model(model, env, num_episodes=20):
-    """Enhanced evaluation"""
-    metrics = {
-        'returns': [],
-        'sharpe_ratios': [],
-        'max_drawdowns': [],
-        'win_rates': [],
-        'profit_factors': [],
-        'recovery_factors': []
+def evaluate_model(model, env, num_episodes=50):
+    """Enhanced evaluation with better error handling"""
+    results = {
+        'episode_returns': [],
+        'portfolio_values': [],
+        'trades': []
     }
     
-    for episode in range(num_episodes):
-        # ... 运行episode ...
-        
-        # 计算更多指标
-        metrics['profit_factors'].append(
-            sum([r for r in returns if r > 0]) / abs(sum([r for r in returns if r < 0]))
-        )
-        metrics['recovery_factors'].append(
-            total_return / abs(max_drawdown) if max_drawdown != 0 else 0
-        )
+    # 获取实际环境（从向量化环境中）
+    if hasattr(env, 'envs'):
+        actual_env = env.envs[0]
+    else:
+        actual_env = env
     
-    # 输出详细评估结果
-    print("\nDetailed Evaluation Results:")
-    for metric, values in metrics.items():
-        print(f"{metric}: {np.mean(values):.3f} ± {np.std(values):.3f}")
+    for episode in range(num_episodes):
+        # 修复 reset() 的返回值解包
+        obs = env.reset()  # 直接接收返回值
+        if isinstance(obs, tuple):  # 兼容新旧版本的 gym
+            obs = obs[0]  # 如果是元组，取第一个值
+            
+        done = False
+        portfolio_values = []
+        episode_trades = []
+        
+        while not done:
+            action, _ = model.predict(obs, deterministic=True)
+            # 修复 step() 的返回值解包
+            step_result = env.step(action)
+            if len(step_result) == 5:  # 新版本 gym
+                obs, reward, done, truncated, info = step_result
+                done = done or truncated
+            else:  # 旧版本 gym
+                obs, reward, done, info = step_result
+            
+            # 修复: 处理向量化环境的info格式
+            if isinstance(info, dict):
+                portfolio_value = info.get('portfolio_value', 0)
+                trades = info.get('trades', [])
+            else:  # VecEnv返回的是info列表
+                portfolio_value = info[0].get('portfolio_value', 0)
+                trades = info[0].get('trades', [])
+                
+            portfolio_values.append(portfolio_value)
+            episode_trades.extend(trades)
+        
+        # 计算每个episode的收益率
+        if len(portfolio_values) > 1:  # 确保有足够的数据
+            episode_return = (portfolio_values[-1] / portfolio_values[0] - 1) * 100
+            results['episode_returns'].append(episode_return)
+            results['portfolio_values'].append(portfolio_values)
+            results['trades'].append(episode_trades)
+    
+    print("\nEvaluation Results:")
+    
+    # 安全计算统计数据
+    if results['episode_returns']:
+        mean_return = np.mean(results['episode_returns'])
+        std_return = np.std(results['episode_returns'])
+        best_return = max(results['episode_returns'])
+        worst_return = min(results['episode_returns'])
+        
+        print(f"Mean Return: {mean_return:.2f}% ± {std_return:.2f}%")
+        print(f"Best Return: {best_return:.2f}%")
+        print(f"Worst Return: {worst_return:.2f}%")
+    else:
+        print("Warning: No valid returns to report")
+    
+    # 安全计算交易统计
+    total_trades = sum(len(episode_trades) for episode_trades in results['trades'])
+    print(f"Total Trades: {total_trades}")
+    
+    if total_trades > 0:
+        # 计算平均仓位大小
+        all_trades = [trade for episode_trades in results['trades'] for trade in episode_trades]
+        avg_position_size = np.mean([abs(trade.get('size', 0)) for trade in all_trades])
+        print(f"Average Position Size: {avg_position_size:.2f}")
+        
+        # 安全获取max_position
+        max_position = getattr(actual_env, 'max_position', 1.0)
+        print(f"Position Utilization: {avg_position_size/max_position:.2%}")
+    else:
+        print("Warning: No trades executed during evaluation")
+    
+    return results
 
 # 添加学习率调度
 def linear_schedule(initial_value: float):
@@ -279,25 +302,171 @@ def linear_schedule(initial_value: float):
     return func
 
 class RewardMonitorCallback(BaseCallback):
-    """自定义回调来监控奖励"""
-    def __init__(self, check_freq: int = 1000, min_reward: float = -5.0, window_size: int = 100):
+    def __init__(self, check_freq: int = 1000, min_reward: float = -100.0):
         super().__init__()
         self.check_freq = check_freq
         self.min_reward = min_reward
-        self.window_size = window_size
         self.rewards = []
-
+        self.raw_rewards = []  # 添加原始奖励跟踪
+        
     def _on_step(self) -> bool:
-        if len(self.rewards) >= self.window_size:
-            self.rewards.pop(0)
-        self.rewards.append(float(self.locals['rewards'][0]))
+        reward = float(self.locals['rewards'][0])
+        
+        # 记录并检查原始奖励
+        if hasattr(self.training_env.envs[0], 'last_raw_reward'):
+            raw_reward = self.training_env.envs[0].last_raw_reward
+            self.raw_rewards.append(raw_reward)
+            
+        if not np.isfinite(reward):
+            print(f"Warning: Invalid reward detected: {reward}")
+            return True
+            
+        self.rewards.append(reward)
         
         if self.n_calls % self.check_freq == 0:
-            mean_reward = np.mean(self.rewards)
-            if mean_reward < self.min_reward:
-                print(f"\nStopping training due to low mean reward: {mean_reward:.2f}")
+            mean_reward = np.mean(self.rewards[-100:])
+            mean_raw_reward = np.mean(self.raw_rewards[-100:]) if self.raw_rewards else 0
+            print(f"Current mean reward: {mean_reward:.2f} (raw: {mean_raw_reward:.2f})")
+            
+            if abs(mean_reward) > 1e6:  # 添加异常值检测
+                print(f"Warning: Reward value too large")
                 return False
+                
         return True
 
+class EarlyStoppingCallback(BaseCallback):
+    """早停回调"""
+    def __init__(
+        self,
+        check_freq: int = 1000,
+        patience: int = 5,
+        min_improvement: float = 0.01,
+        verbose: int = 1
+    ):
+        super().__init__(verbose)
+        self.check_freq = check_freq
+        self.patience = patience
+        self.min_improvement = min_improvement
+        self.best_mean_reward = -np.inf
+        self.no_improvement_count = 0
+        
+    def _on_step(self) -> bool:
+        if self.n_calls % self.check_freq == 0:
+            # 获取最近的平均奖励
+            x, y = self.model.ep_info_buffer.get()
+            mean_reward = np.mean(y)
+            
+            # 检查是否有显著改善
+            improvement = (mean_reward - self.best_mean_reward) / abs(self.best_mean_reward)
+            
+            if improvement > self.min_improvement:
+                self.best_mean_reward = mean_reward
+                self.no_improvement_count = 0
+            else:
+                self.no_improvement_count += 1
+                
+            if self.verbose > 0:
+                print(f"Current mean reward: {mean_reward:.2f}")
+                print(f"Best mean reward: {self.best_mean_reward:.2f}")
+                print(f"No improvement count: {self.no_improvement_count}")
+            
+            # 如果连续多次没有显著改善，停止训练
+            if self.no_improvement_count >= self.patience:
+                if self.verbose > 0:
+                    print("Early stopping triggered!")
+                return False
+                
+        return True
+
+def main():
+    try:
+        # 1. 加载配置
+        config = ConfigManager.load_config()
+        if not ConfigManager.validate_config(config):
+            print("Invalid configuration, using default config")
+            config = ConfigManager.DEFAULT_CONFIG
+        
+        # 2. 创建必要的目录
+        for path in config['paths'].values():
+            os.makedirs(path, exist_ok=True)
+        
+        # 3. 加载数据
+        loader = StockDataLoader(config['data']['stock_code'])
+        print("Loading and preprocessing data...")
+        train_df, test_df = loader.load_and_split_data(
+            start_date=config['data']['start_date'],
+            end_date=config['data']['end_date'],
+            train_ratio=config['data']['train_ratio']
+        )
+        print("Data preprocessing completed successfully")
+        
+        # 4. 创建环境
+        print("Creating environments...")
+        # 训练环境
+        train_env = create_env(train_df, training=True)
+        train_env = RewardScaler(train_env)  # 添加奖励缩放
+        train_env = Monitor(train_env, filename="./logs/train_monitor.csv")
+        train_env = DummyVecEnv([lambda: train_env])
+        
+        # 评估环境
+        eval_env = create_env(test_df, training=False)
+        eval_env = RewardScaler(eval_env)  # 评估环境也添加奖励缩放
+        eval_env = Monitor(eval_env, filename="./logs/eval_monitor.csv")
+        eval_env = DummyVecEnv([lambda: eval_env])
+        
+        # 5. 添加回调
+        callbacks = [
+            EvalCallback(
+                eval_env,
+                best_model_save_path="./best_model/",
+                log_path="./logs/",
+                eval_freq=5000,
+                n_eval_episodes=20,
+                deterministic=True,
+                verbose=1
+            ),
+            CheckpointCallback(
+                save_freq=20000,
+                save_path="./checkpoints/",
+                name_prefix="ppo_stock_model",
+                verbose=1
+            ),
+            # 添加早停回调
+            ImprovedEarlyStoppingCallback(
+                check_freq=2048,
+                patience=10,
+                min_improvement=0.01,
+                reward_threshold=1e4,
+                std_threshold=2.0,
+                verbose=1
+            )
+        ]
+        
+        # 6. 训练模型
+        print("\nTraining Configuration:")
+        print(f"- Total timesteps: {config['training']['total_timesteps']}")
+        print(f"- Batch size: {config['training']['batch_size']}")
+        print(f"- Learning rate: {config['training']['learning_rate']}")
+        print(f"- Network architecture: {config['training']['network']['hidden_sizes']}")
+        print(f"- Target KL: {config['training']['target_kl']}")
+        
+        print("\nStarting training...")
+        model = train_ppo_model(train_env, config)
+        
+        # 7. 评估模型
+        print("\nEvaluating model...")
+        evaluate_model(model, eval_env)
+        
+        # 8. 保存最终模型
+        model.save("./best_model/final_model")
+        print("\nTraining and evaluation completed successfully")
+        
+        return model, train_env, eval_env
+        
+    except Exception as e:
+        print(f"Error in main: {str(e)}")
+        traceback.print_exc()
+        return None, None, None
+
 if __name__ == "__main__":
-    model, env, eval_env = train_ppo_model()  # 获取所有返回的对象
+    model, env, eval_env = main()
