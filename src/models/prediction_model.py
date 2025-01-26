@@ -89,33 +89,30 @@ class PredictionManager:
     
     def prepare_data(self, df: pd.DataFrame) -> Tuple[torch.Tensor, torch.Tensor]:
         """准备训练数据"""
-        if len(df) < self.lookback_window + self.predict_window:
-            raise ValueError("数据长度不足以构建训练样本")
-        
-        if df.isna().any().any():
+        if df.isnull().values.any():
             raise ValueError("数据中包含缺失值")
         
-        # 提取特征
         features = df[['close', 'volume', 'ma5', 'ma20', 'macd', 'signal', 'rsi', 'volatility']].values
         
         # 标准化数据
         if self.feature_means is None:
             self.feature_means = np.mean(features, axis=0)
             self.feature_stds = np.std(features, axis=0)
-            self.feature_stds[self.feature_stds == 0] = 1  # 避免除零
+            self.feature_stds[self.feature_stds == 0] = 1
             
-            # 单独保存价格的均值和标准差
             self.price_mean = self.feature_means[0]
             self.price_std = self.feature_stds[0]
         
-        # 应用标准化
         normalized_features = (features - self.feature_means) / self.feature_stds
         
         X, y = [], []
         for i in range(len(normalized_features) - self.lookback_window - self.predict_window + 1):
             X.append(normalized_features[i:i+self.lookback_window])
-            # 只使用收盘价作为目标值
             y.append(normalized_features[i+self.lookback_window:i+self.lookback_window+self.predict_window, 0])
+        
+        # 先转换为numpy数组，再转换为tensor
+        X = np.array(X)
+        y = np.array(y)
         
         return torch.FloatTensor(X), torch.FloatTensor(y)
     
