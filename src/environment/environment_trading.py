@@ -12,7 +12,7 @@ class StockTradingEnvironment(gym.Env):
         self,
         df: pd.DataFrame,
         initial_balance: float = 1_000_000.0,
-        transaction_fee: float = 0.0003,
+        transaction_cost: float = 0.0003,
         reward_scaling: float = 1.0
     ):
         """
@@ -21,7 +21,7 @@ class StockTradingEnvironment(gym.Env):
         Args:
             df: 股票数据
             initial_balance: 初始资金
-            transaction_fee: 交易费用
+            transaction_cost: 交易费用
             reward_scaling: 奖励缩放
         """
         super().__init__()
@@ -31,7 +31,7 @@ class StockTradingEnvironment(gym.Env):
         
         # 基础设置
         self.initial_cash = initial_balance
-        self.transaction_cost = transaction_fee
+        self.transaction_cost = transaction_cost
         self.reward_scaling = reward_scaling
         
         # 交易参数
@@ -107,26 +107,11 @@ class StockTradingEnvironment(gym.Env):
             # 更新当前价格
             self._current_price = float(self.df['close'].iloc[self.current_step])
             
+            # 执行交易
+            self._execute_trade(action)
+            
             # 更新状态并检查是否触发止损
-            stop_loss_triggered = False
-            
-            # 检查止损条件
-            if self.position > 0:
-                current_value = self.position * self._current_price
-                drawdown = (self.max_value - current_value) / self.max_value
-                if drawdown > self.stop_loss_threshold:
-                    # 记录止损前的价值
-                    pre_stop_loss_value = self.total_value
-                    # 执行平仓
-                    self._close_position()
-                    # 确保止损后的价值小于止损前
-                    self.total_value = min(self.total_value, pre_stop_loss_value * (1 - self.stop_loss_threshold))
-                    stop_loss_triggered = True
-            
-            # 如果没有触发止损，执行交易
-            if not stop_loss_triggered:
-                self._execute_trade(action)
-                self._update_state()
+            stop_loss_triggered = self._update_state()
             
             # 计算奖励
             reward = self._calculate_reward(prev_value)
@@ -149,46 +134,45 @@ class StockTradingEnvironment(gym.Env):
             logging.error(f"Error in step: {str(e)}")
             raise
     
-    def _execute_trade(self, action: np.ndarray) -> None:
+    def _execute_trade(self, action):
         """执行交易"""
-        try:
-            current_price = float(self.df['close'].iloc[self.current_step])
-            target_position = float(action[0]) * self.max_position
-            
-            # 计算需要交易的数量
-            position_delta = target_position - self.position
-            
-            if abs(position_delta) > 0.01:  # 忽略很小的交易
-                # 计算交易成本
-                trade_cost = abs(position_delta * current_price * self.transaction_cost)
-                
-                if position_delta > 0:  # 买入
-                    required_cash = position_delta * current_price * (1 + self.transaction_cost)
-                    if required_cash <= self.cash:
-                        self.position += position_delta
-                        self.cash -= required_cash
-                        self.trades.append({
-                            'step': self.current_step,
-                            'type': 'buy',
-                            'amount': position_delta,
-                            'price': current_price,
-                            'cost': trade_cost
-                        })
-                else:  # 卖出
-                    # 确保不超过持仓量
-                    position_delta = max(position_delta, -self.position)
-                    self.position += position_delta
-                    self.cash += -position_delta * current_price * (1 - self.transaction_cost)
-                    self.trades.append({
-                        'step': self.current_step,
-                        'type': 'sell',
-                        'amount': -position_delta,
-                        'price': current_price,
-                        'cost': trade_cost
-                    })
+        current_price = self._current_price
         
-        except Exception as e:
-            logging.error(f"Error executing trade: {str(e)}")
+        if action[0] > 0:  # 买入
+            # 计算买入金额和数量
+            trade_value = self.cash * action[0]  # 使用可用现金的比例
+            shares = trade_value / current_price
+            
+            # 执行买入
+            self.position += shares
+            self.cash -= trade_value
+            
+            # 记录交易
+            self.trades.append({
+                'step': self.current_step,
+                'type': 'buy',
+                'shares': shares,
+                'price': current_price,
+                'value': trade_value
+            })
+        
+        elif action[0] < 0:  # 卖出
+            # 计算卖出数量
+            shares = self.position * abs(action[0])  # 使用持仓的比例
+            trade_value = shares * current_price
+            
+            # 执行卖出
+            self.position -= shares
+            self.cash += trade_value
+            
+            # 记录交易
+            self.trades.append({
+                'step': self.current_step,
+                'type': 'sell',
+                'shares': shares,
+                'price': current_price,
+                'value': trade_value
+            })
     
     def _update_state(self) -> bool:
         """更新状态"""
@@ -223,7 +207,7 @@ class StockTradingEnvironment(gym.Env):
             # 计算夏普比率组件
             if len(self.trades) > 1:
                 returns_std = np.std([
-                    (t['amount'] * t['price']) / prev_value - 1 
+                    (t['shares'] * t['price']) / prev_value - 1  # 修改这里：使用 shares 而不是 amount
                     for t in self.trades[-20:]
                 ])
                 sharpe = returns / (returns_std + 1e-6)
@@ -285,16 +269,16 @@ class StockTradingEnvironment(gym.Env):
         """平仓"""
         if self.position != 0:
             # 计算平仓收益
-            revenue = self.position * self._current_price * (1 - self.transaction_cost)
-            self.cash += revenue
+            trade_value = self.position * self._current_price
+            self.cash += trade_value
             
             # 记录交易
             self.trades.append({
                 'step': self.current_step,
                 'type': 'close',
-                'amount': -self.position,
+                'shares': -self.position,
                 'price': self._current_price,
-                'cost': abs(revenue) * self.transaction_cost
+                'value': trade_value
             })
             
             # 清空仓位

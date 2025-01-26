@@ -49,7 +49,7 @@ class TestStockTradingEnvironment(unittest.TestCase):
         self.env = StockTradingEnvironment(
             df=self.test_data,
             initial_balance=1_000_000.0,
-            transaction_fee=0.0003,  # 使用更真实的交易成本
+            transaction_cost=0.0003,  # 修改这里：使用 transaction_cost
             reward_scaling=1.0
         )
     
