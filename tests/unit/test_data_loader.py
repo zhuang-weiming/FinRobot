@@ -104,4 +104,4 @@ class TestStockDataLoader:
         for code in unsupported_codes:
             with pytest.raises(ValueError) as context:
                 StockDataLoader(code, {})
-            assert str(context.value) == "Currently only supports 000001.SH (SSE Composite Index)" 
+            assert str(context.value) == "Currently only supports: 000001.SH, 300059.SZ, 601788.SH" 

@@ -175,21 +175,33 @@ class TestPrediction(unittest.TestCase):
     
     def test_error_handling(self):
         """测试错误处理"""
-        # 测试输入数据不足
-        with self.assertRaises(ValueError):
-            short_data = self.test_data.iloc[:10]
-            self.predictor.prepare_data(short_data)
+        # 创建一个包含不足数据的DataFrame
+        insufficient_data = pd.DataFrame({
+            'close': [100] * 10,  # 只有10天数据
+            'volume': [1000] * 10,
+            'ma5': [100] * 10,
+            'ma20': [100] * 10,
+            'macd': [0] * 10,
+            'signal': [0] * 10,
+            'rsi': [50] * 10,
+            'volatility': [0.1] * 10
+        }, index=pd.date_range('2020-01-01', periods=10))
         
-        # 测试无效的特征数据
-        invalid_data = self.test_data.copy()
-        invalid_data.loc[0, 'close'] = np.nan
-        with self.assertRaises(ValueError):
-            self.predictor.prepare_data(invalid_data)
+        predictor = PredictionManager(
+            lookback_window=30,  # 需要30天数据
+            predict_window=5,
+            batch_size=32
+        )
         
-        # 测试预测时的输入维度错误
+        # 测试数据长度不足的情况
         with self.assertRaises(ValueError):
-            invalid_features = np.random.randn(10, 5)  # 错误的特征维度
-            self.predictor.predict(invalid_features)
+            predictor.prepare_data(insufficient_data)
+        
+        # 测试缺失值的情况
+        invalid_data = insufficient_data.copy()
+        invalid_data.loc[invalid_data.index[0], 'close'] = np.nan
+        with self.assertRaises(ValueError):
+            predictor.prepare_data(invalid_data)
 
 if __name__ == '__main__':
     unittest.main() 

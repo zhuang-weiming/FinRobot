@@ -9,6 +9,7 @@ import matplotlib.dates as mdates
 from src.data.data_loader import StockDataLoader
 from src.models.prediction_model import PredictionManager
 import seaborn as sns
+import argparse
 
 def plot_prediction_results(predictor, train_data, test_data, future_dates, future_predictions, title="上证指数预测结果"):
     """绘制预测结果"""
@@ -329,14 +330,32 @@ def plot_combined_predictions(predictor, historical_data, future_dates, future_p
     plt.tight_layout()
     return plt.gcf()
 
+def get_stock_name(stock_code: str) -> str:
+    """获取股票名称"""
+    stock_names = {
+        '000001.SH': '上证指数',
+        '300059.SZ': '东方财富'
+    }
+    return stock_names.get(stock_code, stock_code)
+
 def main():
+    # 解析命令行参数
+    parser = argparse.ArgumentParser(description='股票预测分析工具')
+    parser.add_argument('--stock', type=str, default='000001.SH',
+                      choices=['000001.SH', '300059.SZ'],
+                      help='股票代码 (000001.SH-上证指数, 300059.SZ-东方财富)')
+    args = parser.parse_args()
+    
     # 加载数据
     config = {
-        'stock_code': '000001.SH',
+        'stock_code': args.stock,
         'start_date': '20200101',
         'end_date': '20241231',
         'train_ratio': 0.8
     }
+    
+    stock_name = get_stock_name(args.stock)
+    print(f"正在分析 {stock_name}...")
     
     data_loader = StockDataLoader(config['stock_code'], config)
     train_data, test_data = data_loader.load_and_split_data(
@@ -374,26 +393,26 @@ def main():
     # 绘制预测结果
     pred_fig = plot_prediction_results(
         predictor,
-        train_data,  # 传入训练数据
-        test_data,   # 传入测试数据
+        train_data,
+        test_data,
         future_dates,
         future_predictions,
-        "上证指数预测结果 (2020-2025)"
+        f"{stock_name}预测结果 (2020-2025)"
     )
-    pred_fig.savefig('prediction_results.png', dpi=300, bbox_inches='tight')
+    pred_fig.savefig(f'{args.stock}_prediction_results.png', dpi=300, bbox_inches='tight')
     
     # 分析预测性能
     perf_fig = analyze_prediction_performance(predictor, test_data)
-    perf_fig.savefig('prediction_performance.png', dpi=300, bbox_inches='tight')
+    perf_fig.savefig(f'{args.stock}_prediction_performance.png', dpi=300, bbox_inches='tight')
     
     # 打印未来预测结果
-    print("\n未来6个月预测结果:")
+    print(f"\n{stock_name}未来6个月预测结果:")
     for date, pred in zip(future_dates, future_predictions):
         print(f"{date.strftime('%Y-%m-%d')}: {pred:.2f}")
     
     # 保存模型
-    predictor.save('stock_predictor.pth')
-    print("\n模型已保存到 stock_predictor.pth")
+    predictor.save(f'{args.stock}_predictor.pth')
+    print(f"\n模型已保存到 {args.stock}_predictor.pth")
 
 if __name__ == '__main__':
     main() 

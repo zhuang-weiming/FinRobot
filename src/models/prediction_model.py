@@ -89,6 +89,11 @@ class PredictionManager:
     
     def prepare_data(self, df: pd.DataFrame) -> Tuple[torch.Tensor, torch.Tensor]:
         """准备训练数据"""
+        # 验证数据长度
+        if len(df) < self.lookback_window + self.predict_window:
+            raise ValueError(f"数据长度不足，需要至少 {self.lookback_window + self.predict_window} 天数据")
+        
+        # 验证数据完整性
         if df.isnull().values.any():
             raise ValueError("数据中包含缺失值")
         
