@@ -24,32 +24,62 @@ wheels/
 venv/
 env/
 ENV/
+.env
+.venv
 
 # IDE
 .idea/
 .vscode/
 *.swp
 *.swo
+.DS_Store
 
-# Logs and databases
+# Project specific
 *.log
-*.sqlite
 logs/
-*.db
-
-# Model checkpoints and results
-checkpoints/
-best_model/
-results/
-*.h5
+*.pkl
 *.pth
 *.pt
+*.h5
+*.hdf5
+*.csv
+*.json
+*.yaml
+!config/config.yaml  # 保留配置文件
+backtest_results.png
+prediction_results.png
+test_indicators.png
+training_indicators.png
 
-# OS
-.DS_Store
-.DS_Store?
-._*
-.Spotlight-V100
-.Trashes
-ehthumbs.db
-Thumbs.db
+# Temp files
+*.bak
+*.tmp
+*~
+.pytest_cache/
+.coverage
+htmlcov/
+coverage.xml
+
+# Requirements
+requirements-dev.txt
+requirements-temp.txt
+
+# Data
+data/
+datasets/
+checkpoints/
+results/
+output/
+models/saved/
+
+# Documentation
+docs/_build/
+docs/generated/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+*.ipynb
+
+# Local development
+local_settings.py
+db.sqlite3
